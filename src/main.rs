@@ -1,4 +1,6 @@
-use magick_rust::PixelWand;
+use eyre::ContextCompat;
+use futures::future::join_all;
+use image::{GenericImage, ImageFormat, ImageReader, RgbImage};
 use reqwest::header;
 use reqwest::header::CONTENT_TYPE;
 use std::cmp::{Ordering, PartialOrd};
@@ -8,6 +10,7 @@ use std::fs::File;
 use std::io::Write;
 use std::path::Path;
 use std::time::Duration;
+use tokio::task;
 const T: u64 = 10000;
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
@@ -25,11 +28,7 @@ async fn main() -> eyre::Result<()> {
         let major = r.chars().take(4).collect::<String>().parse::<usize>()?;
         let minor = if !is_list {
             let minor = r.chars().skip(4).collect::<String>().parse::<usize>()?;
-            if minor == 0 {
-                None
-            } else {
-                Some(minor)
-            }
+            if minor == 0 { None } else { Some(minor) }
         } else {
             None
         };
@@ -191,8 +190,7 @@ async fn main() -> eyre::Result<()> {
         }
         mangas.push(manga);
     }
-    let mut n = 0;
-    for Manga { name, chapters } in mangas {
+    for (n, Manga { name, chapters }) in mangas.into_iter().enumerate() {
         let mut sort = if let Some((read, lst)) = versions.get(&name) {
             let mut vec = Vec::new();
             for (version, mut chapter) in chapters {
@@ -226,101 +224,110 @@ async fn main() -> eyre::Result<()> {
             fs::create_dir_all(Path::new(p3).join(&name))?;
         }
         for (k, (version, chapter)) in sort.iter().enumerate() {
-            let mut page = 1;
             let mut paths = Vec::new();
-            loop {
-                let url = format!(
-                    "{}/{:04}{}-{:03}{}",
-                    chapter.url,
-                    version.major,
-                    version
-                        .minor
-                        .map(|i| ".".to_string() + &i.to_string())
-                        .unwrap_or(String::new()),
-                    page,
-                    chapter.append
-                );
+            println!(
+                "\x1b[A\x1b[G\x1b[K{}/{}, {}/{}",
+                n + 1,
+                total_manga,
+                k + 1,
+                sort.len(),
+            );
+            let tasks: Vec<_> = (1..=chapter.page_count)
+                .map(async |page| {
+                    let client = client.clone();
+                    let chapter = chapter.clone();
+                    let version = *version;
+                    let bytes = task::spawn(async move {
+                        let mut bytes: Vec<u8>;
+                        loop {
+                            let url = format!(
+                                "{}/{:04}{}-{:03}{}",
+                                chapter.url,
+                                version.major,
+                                version
+                                    .minor
+                                    .map(|i| ".".to_string() + &i.to_string())
+                                    .unwrap_or(String::new()),
+                                page,
+                                chapter.append
+                            );
+                            let body = client
+                                .get(url)
+                                .header(header::USER_AGENT, user_agent)
+                                .header(header::REFERER, "https://weebcentral.com")
+                                .send()
+                                .await
+                                .unwrap();
+                            if body.headers().get(CONTENT_TYPE).unwrap().to_str().unwrap()
+                                != "image/png"
+                            {
+                                tokio::time::sleep(Duration::from_millis(T)).await;
+                                continue;
+                            }
+                            bytes = body.bytes().await.unwrap().into();
+                            if bytes.is_empty() {
+                                tokio::time::sleep(Duration::from_millis(T)).await;
+                                continue;
+                            }
+                            break;
+                        }
+                        bytes
+                    })
+                    .await
+                    .unwrap();
+                    (page, bytes)
+                })
+                .collect();
+            let images = join_all(tasks)
+                .await
+                .into_iter()
+                .collect::<Vec<(usize, Vec<u8>)>>();
+            for (page, bytes) in images {
                 let path = Path::new(p3).join(&name).join(format!(
                     "1{:04}{}-{:03}",
                     version.major,
                     version.minor.unwrap_or(0),
-                    page,
+                    page
                 ));
                 let mut file = File::create(&path)?;
+                file.write_all(&bytes)?;
                 if chapter.is_list {
                     paths.push(path);
                 }
-                let body = client
-                    .get(url)
-                    .header(header::USER_AGENT, user_agent)
-                    .header(header::REFERER, "https://weebcentral.com")
-                    .send()
-                    .await?;
-                if body.headers().get(CONTENT_TYPE).unwrap().to_str()? != "image/png" {
-                    tokio::time::sleep(Duration::from_millis(T)).await;
-                    continue;
-                }
-                let bytes = body.bytes().await?;
-                if bytes.is_empty() {
-                    tokio::time::sleep(Duration::from_millis(T)).await;
-                    continue;
-                }
-                println!(
-                    "\x1b[A\x1b[G\x1b[K{}/{}, {}/{}, {}/{}",
-                    n + 1,
-                    total_manga,
-                    k + 1,
-                    sort.len(),
-                    page,
-                    chapter.page_count
-                );
-                file.write_all(&bytes)?;
-                page += 1;
-                if page == chapter.page_count + 1 {
-                    break;
-                }
             }
             if chapter.is_list {
-                let mut wand = magick_rust::MagickWand::new();
-                if paths.len() < 4 {
-                    for path in &paths {
-                        wand.read_image(path.to_str().unwrap())?;
-                    }
-                } else {
-                    let width = {
-                        let w = magick_rust::MagickWand::new();
-                        w.read_image(paths[paths.len() / 2].to_str().unwrap())?;
-                        w.get_image_width()
-                    };
-                    for path in &paths {
-                        let w = magick_rust::MagickWand::new();
-                        w.read_image(path.to_str().unwrap())?;
-                        if w.get_image_width() == width {
-                            wand.read_image(path.to_str().unwrap())?;
-                        }
+                let mut height = 0;
+                let width = {
+                    let w = ImageReader::open(&paths[paths.len() / 2])?
+                        .with_guessed_format()?
+                        .decode()?;
+                    w.width()
+                };
+                let mut images = Vec::new();
+                for path in &paths {
+                    let w = ImageReader::open(&path)?
+                        .with_guessed_format()?
+                        .decode()?;
+                    if w.width() == width {
+                        height += w.height();
+                        images.push(w.as_rgb8().wrap_err("image err")?.clone());
                     }
                 }
-                let mut pxw = PixelWand::new();
-                let wand = wand.append_all(true)?;
-                pxw.set_color("#000000")?;
-                wand.set_image_background_color(&pxw)?;
-                let path = Path::new(p3)
-                    .join(&name)
-                    .join(format!("#{:04}.png", version.major));
-                wand.write_image(path.to_str().unwrap())?;
-                fs::copy(
-                    &path,
-                    Path::new(p3)
-                        .join(&name)
-                        .join(format!("#{:04}", version.major)),
-                )?;
                 for path in paths {
                     fs::remove_file(path)?;
                 }
-                fs::remove_file(path)?;
+                let mut image = RgbImage::new(width, height);
+                let mut running_height = 0;
+                for rgb in images {
+                    image.copy_from(&rgb, 0, running_height)?;
+                    running_height += rgb.height();
+                }
+                let path = Path::new(p3)
+                    .join(&name)
+                    .join(format!("#{:04}", version.major));
+                image.save_with_format(path, ImageFormat::Png)?;
             }
         }
-        n += 1;
     }
     Ok(())
 }
@@ -375,6 +382,7 @@ struct Version {
     major: usize,
     minor: Option<usize>,
 }
+#[derive(Clone)]
 struct Chapter {
     page_count: usize,
     url: String,
