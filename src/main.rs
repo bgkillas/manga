@@ -126,7 +126,6 @@ async fn main() -> eyre::Result<()> {
             .text()
             .await?;
         if body.contains("No results found") {
-            list.insert(0, name);
             tokio::time::sleep(Duration::from_millis(T)).await;
             continue;
         }
@@ -165,6 +164,7 @@ async fn main() -> eyre::Result<()> {
             chapters: Default::default(),
         };
         let total = chapters.len();
+        let mut hit = false;
         while !chapters.is_empty() {
             let base = chapters.remove(0);
             let url = get_url(&base)?;
@@ -203,6 +203,7 @@ async fn main() -> eyre::Result<()> {
             );
             if let Some(v) = versions.get(&name) {
                 if v.0 >= ver {
+                    hit = true;
                     break;
                 }
             }
@@ -221,7 +222,6 @@ async fn main() -> eyre::Result<()> {
                     let url = format!("{}/{:04}-001{}", site, chap, append);
                     if client
                         .get(url)
-                        .header(header::USER_AGENT, user_agent)
                         .header(header::REFERER, "https://weebcentral.com")
                         .send()
                         .await?
@@ -249,8 +249,13 @@ async fn main() -> eyre::Result<()> {
                 }
             }*/
         }
-        if manga.chapters.len() > 1 {
-            println!("\x1b[G\x1b[K{}: {}", manga.name, manga.chapters.len() - 1);
+        if hit {
+            if manga.chapters.len() > 1 {
+                println!("\x1b[G\x1b[K{}: {}", manga.name, manga.chapters.len() - 1);
+                mangas.push(manga);
+            }
+        } else if !manga.chapters.is_empty() {
+            println!("\x1b[G\x1b[K{}: {}", manga.name, manga.chapters.len());
             mangas.push(manga);
         }
         if !list.is_empty() {
