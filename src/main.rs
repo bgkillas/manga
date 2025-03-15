@@ -7,8 +7,8 @@ use std::cmp::{Ordering, PartialOrd};
 use std::collections::HashMap;
 use std::fs;
 use std::fs::File;
-use std::io::Write;
-use std::path::Path;
+use std::io::{Write, stdout};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::task;
 const T: u64 = 10000;
@@ -18,6 +18,7 @@ async fn main() -> eyre::Result<()> {
     let p2 = "/home/.p/";
     let p3 = "/home/.m/";
     let mut versions = HashMap::new();
+    let mut stdout = stdout().lock();
     for p in fs::read_dir(p2)? {
         let p = p?.path();
         let n = p.to_str().unwrap().to_string();
@@ -34,9 +35,72 @@ async fn main() -> eyre::Result<()> {
         };
         versions.insert(n, (Version { major, minor }, is_list));
     }
+    for n in fs::read_dir(p3)? {
+        let n = n?.path();
+        let name = n
+            .to_str()
+            .unwrap()
+            .chars()
+            .skip(p3.len())
+            .collect::<String>();
+        let mut last: Option<Version> = None;
+        for p in fs::read_dir(n)?
+            .map(|p| p.unwrap().path())
+            .collect::<Vec<PathBuf>>()
+            .iter()
+            .rev()
+        {
+            let s = p.to_str().unwrap();
+            if !s.contains('-') {
+                let major = s
+                    .chars()
+                    .skip(s.find(&name).unwrap() + name.len() + 2)
+                    .collect::<String>()
+                    .parse::<usize>()?;
+                let ver = Version { major, minor: None };
+                match last {
+                    Some(v) if ver > v => {
+                        last = Some(ver);
+                    }
+                    None => {
+                        last = Some(ver);
+                    }
+                    _ => {}
+                }
+            } else if s.contains("-001") {
+                let ver = s
+                    .chars()
+                    .skip(s.find(&name).unwrap() + name.len() + 2)
+                    .take(5);
+                let major = ver.clone().take(4).collect::<String>().parse::<usize>()?;
+                let minor = ver.skip(4).collect::<String>().parse::<usize>()?;
+                let minor = if minor == 0 { None } else { Some(minor) };
+                let ver = Version { major, minor };
+                match last {
+                    Some(v) if ver > v => {
+                        last = Some(ver);
+                    }
+                    None => {
+                        last = Some(ver);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if let Some(ver) = last {
+            match versions.get(&name) {
+                Some((v, b)) if ver > *v => {
+                    versions.insert(name, (ver, *b));
+                }
+                None => {
+                    versions.insert(name, (ver, false));
+                }
+                _ => {}
+            }
+        }
+    }
     let mut list = fs::read_to_string(p1)?
         .lines()
-        .take(1)
         .filter_map(|l| {
             if !l.contains('#') && !l.contains("tower-of-god") {
                 Some(l.chars().filter(|c| !c.is_ascii_whitespace()).collect())
@@ -46,7 +110,6 @@ async fn main() -> eyre::Result<()> {
         })
         .collect::<Vec<String>>();
     let client = reqwest::Client::new();
-    let user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.5672.127 Safari/537.36";
     let mut mangas = Vec::new();
     let total_manga = list.len();
     while !list.is_empty() {
@@ -57,7 +120,6 @@ async fn main() -> eyre::Result<()> {
         );
         let body = client
             .get(url)
-            .header(header::USER_AGENT, user_agent)
             .header(header::REFERER, "https://weebcentral.com")
             .send()
             .await?
@@ -75,11 +137,10 @@ async fn main() -> eyre::Result<()> {
             tokio::time::sleep(Duration::from_millis(T)).await;
             continue;
         };
-        let url = get_url(url);
+        let url = get_url(url)?;
         let url = url.replace(&name, "full-chapter-list");
         let body = client
             .get(url)
-            .header(header::USER_AGENT, user_agent)
             .header(header::REFERER, "https://weebcentral.com")
             .send()
             .await?
@@ -106,10 +167,9 @@ async fn main() -> eyre::Result<()> {
         let total = chapters.len();
         while !chapters.is_empty() {
             let base = chapters.remove(0);
-            let url = get_url(&base);
+            let url = get_url(&base)?;
             let body = client
                 .get(url)
-                .header(header::USER_AGENT, user_agent)
                 .header(header::REFERER, "https://weebcentral.com")
                 .send()
                 .await?
@@ -117,14 +177,15 @@ async fn main() -> eyre::Result<()> {
                 .await?;
             let (Some(pages), Some(url)) = (
                 body.lines().find(|l| l.contains("max_page: ")),
-                body.lines()
-                    .find(|l| l.contains(&name) && l.contains("image")),
+                body.lines().find(|l| {
+                    l.contains(&name) && l.contains("href") && l.contains("as=\"image\"")
+                }),
             ) else {
                 tokio::time::sleep(Duration::from_millis(T)).await;
                 chapters.insert(0, base);
                 continue;
             };
-            let url = get_url(url);
+            let url = get_url(url)?;
             let pages = get_num(pages)?;
             let (site, chap, part, append) = get_chap(&url)?;
             let ver = Version {
@@ -145,16 +206,16 @@ async fn main() -> eyre::Result<()> {
                     break;
                 }
             }
-            println!(
-                "\x1b[A\x1b[G\x1b[K{}/{}, {}/{}",
-                list.len() + 1,
+            print!(
+                "\x1b[G\x1b[K{}/{}, {}/{}",
+                total_manga - list.len(),
                 total_manga,
                 total - chapters.len(),
                 total
             );
+            stdout.flush()?;
             /*if chap == chapters.len() + 1 {
                 while !chapters.is_empty() {
-                    println!("{} {}", list.len(), chapters.len());
                     let base = chapters.remove(0);
                     chap -= 1;
                     let url = format!("{}/{:04}-001{}", site, chap, append);
@@ -188,55 +249,37 @@ async fn main() -> eyre::Result<()> {
                 }
             }*/
         }
-        mangas.push(manga);
+        if manga.chapters.len() > 1 {
+            println!("\x1b[G\x1b[K{}: {}", manga.name, manga.chapters.len() - 1);
+            mangas.push(manga);
+        }
+        if !list.is_empty() {
+            print!(
+                "\x1b[G\x1b[K{}/{}",
+                total_manga - list.len() + 1,
+                total_manga,
+            );
+            stdout.flush()?;
+        }
     }
     for (n, Manga { name, chapters }) in mangas.into_iter().enumerate() {
-        let mut sort = if let Some((read, lst)) = versions.get(&name) {
-            let mut vec = Vec::new();
-            for (version, mut chapter) in chapters {
-                if version >= *read {
-                    let path = Path::new(p3).join(&name).join(if chapter.is_list {
-                        format!("#{:04}", version.major)
-                    } else {
-                        format!(
-                            "1{:04}{}-{:03}",
-                            version.major,
-                            version.minor.unwrap_or(0),
-                            chapter.page_count,
-                        )
-                    });
-                    if !fs::exists(path)? {
-                        chapter.is_list = *lst;
-                        vec.push((version, chapter));
-                    }
-                }
-            }
-            vec
-        } else {
-            let mut vec = Vec::new();
-            for (version, chapter) in chapters {
-                vec.push((version, chapter));
-            }
-            vec
-        };
+        let mut sort = Vec::new();
+        for (version, chapter) in chapters {
+            sort.push((version, chapter));
+        }
         sort.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
         if !sort.is_empty() {
             fs::create_dir_all(Path::new(p3).join(&name))?;
         }
-        for (k, (version, chapter)) in sort.iter().enumerate() {
+        let l = sort.len();
+        for (k, (version, chapter)) in sort.into_iter().enumerate() {
             let mut paths = Vec::new();
-            println!(
-                "\x1b[A\x1b[G\x1b[K{}/{}, {}/{}",
-                n + 1,
-                total_manga,
-                k + 1,
-                sort.len(),
-            );
+            print!("\x1b[G\x1b[K{}/{}, {}/{}", n + 1, total_manga, k + 1, l,);
+            stdout.flush()?;
             let tasks: Vec<_> = (1..=chapter.page_count)
                 .map(async |page| {
                     let client = client.clone();
                     let chapter = chapter.clone();
-                    let version = *version;
                     let bytes = task::spawn(async move {
                         let mut bytes: Vec<u8>;
                         loop {
@@ -253,7 +296,6 @@ async fn main() -> eyre::Result<()> {
                             );
                             let body = client
                                 .get(url)
-                                .header(header::USER_AGENT, user_agent)
                                 .header(header::REFERER, "https://weebcentral.com")
                                 .send()
                                 .await
@@ -305,9 +347,7 @@ async fn main() -> eyre::Result<()> {
                 };
                 let mut images = Vec::new();
                 for path in &paths {
-                    let w = ImageReader::open(&path)?
-                        .with_guessed_format()?
-                        .decode()?;
+                    let w = ImageReader::open(path)?.with_guessed_format()?.decode()?;
                     if w.width() == width {
                         height += w.height();
                         images.push(w.as_rgb8().wrap_err("image err")?.clone());
@@ -331,12 +371,15 @@ async fn main() -> eyre::Result<()> {
     }
     Ok(())
 }
-fn get_url(url: &str) -> String {
+fn get_url(url: &str) -> eyre::Result<String> {
     let url = url
         .chars()
-        .skip(url.find("href=\"").unwrap() + 6)
+        .skip(url.find("href=\"").wrap_err("find err")? + 6)
         .collect::<String>();
-    url.chars().take(url.find('"').unwrap()).collect::<String>()
+    Ok(url
+        .chars()
+        .take(url.find('"').wrap_err("find err")?)
+        .collect::<String>())
 }
 fn get_chap(url: &str) -> eyre::Result<(String, usize, Option<usize>, String)> {
     let mut split = url.split('/');
