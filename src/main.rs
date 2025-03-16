@@ -10,15 +10,28 @@ use std::fs::File;
 use std::io::{Write, stdout};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use tokio::task;
+use tokio::task::JoinHandle;
 const T: u64 = 10000;
-#[tokio::main]
+#[tokio::main(flavor = "multi_thread")]
 async fn main() -> eyre::Result<()> {
     let p1 = "/home/.li";
     let p2 = "/home/.p/";
     let p3 = "/home/.m/";
-    let mut versions = HashMap::new();
+    let mut list = fs::read_to_string(p1)?
+        .lines()
+        .filter_map(|l| {
+            if !l.contains('#') && !l.contains("tower-of-god") {
+                Some(l.chars().filter(|c| !c.is_ascii_whitespace()).collect())
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<String>>();
+    let total_manga = list.len();
     let mut stdout = stdout().lock();
+    print!("\x1b[G\x1b[K1/{}", total_manga);
+    stdout.flush()?;
+    let mut versions = HashMap::new();
     for p in fs::read_dir(p2)? {
         let p = p?.path();
         let n = p.to_str().unwrap().to_string();
@@ -28,6 +41,7 @@ async fn main() -> eyre::Result<()> {
         let r = r.chars().skip(1).take(5).collect::<String>();
         let major = r.chars().take(4).collect::<String>().parse::<usize>()?;
         let minor = if !is_list {
+            //TODO make more consistent
             let minor = r.chars().skip(4).collect::<String>().parse::<usize>()?;
             if minor == 0 { None } else { Some(minor) }
         } else {
@@ -99,19 +113,8 @@ async fn main() -> eyre::Result<()> {
             }
         }
     }
-    let mut list = fs::read_to_string(p1)?
-        .lines()
-        .filter_map(|l| {
-            if !l.contains('#') && !l.contains("tower-of-god") {
-                Some(l.chars().filter(|c| !c.is_ascii_whitespace()).collect())
-            } else {
-                None
-            }
-        })
-        .collect::<Vec<String>>();
     let client = Client::new();
-    let total_manga = list.len();
-    let mut tasks: Vec<_> = Vec::new();
+    let mut tasks: Vec<JoinHandle<eyre::Result<()>>> = Vec::new();
     while !list.is_empty() {
         let name = list.remove(0);
         let url = format!(
@@ -198,7 +201,7 @@ async fn main() -> eyre::Result<()> {
                     page_count: pages,
                     url: site.clone(),
                     append: append.clone(),
-                    is_list: false,
+                    is_list: versions.get(&name).map(|(_, l)| *l).unwrap_or(false),
                 },
             );
             if let Some(v) = versions.get(&name) {
@@ -222,12 +225,16 @@ async fn main() -> eyre::Result<()> {
             if manga.chapters.len() > 1 {
                 println!("\x1b[G\x1b[K{}: {}", manga.name, manga.chapters.len() - 1);
                 let client = client.clone();
-                tasks.push(task::spawn(async move { download(manga, p3, client) }));
+                tasks.push(tokio::spawn(
+                    async move { download(manga, p3, client).await },
+                ));
             }
         } else if !manga.chapters.is_empty() {
             println!("\x1b[G\x1b[K{}: {}", manga.name, manga.chapters.len());
             let client = client.clone();
-            tasks.push(task::spawn(async move { download(manga, p3, client) }));
+            tasks.push(tokio::spawn(
+                async move { download(manga, p3, client).await },
+            ));
         }
         if !list.is_empty() {
             print!(
@@ -238,10 +245,16 @@ async fn main() -> eyre::Result<()> {
             stdout.flush()?;
         }
     }
-    for task in tasks {
-        task.await?.await?
+    for task in join_all(tasks)
+        .await
+        .into_iter()
+        .map(|ret| ret.unwrap())
+        .collect::<Vec<eyre::Result<()>>>()
+    {
+        task?
     }
-    println!();
+    print!("\x1b[G\x1b[K");
+    stdout.flush()?;
     Ok(())
 }
 fn get_url(url: &str) -> eyre::Result<String> {
@@ -319,6 +332,44 @@ impl PartialOrd<Version> for Version {
         }
     }
 }
+async fn get_img(
+    chapter: Chapter,
+    version: Version,
+    page: usize,
+    client: Client,
+) -> (usize, Vec<u8>) {
+    let mut bytes: Vec<u8>;
+    loop {
+        let url = format!(
+            "{}/{:04}{}-{:03}{}",
+            chapter.url,
+            version.major,
+            version
+                .minor
+                .map(|i| ".".to_string() + &i.to_string())
+                .unwrap_or_default(),
+            page,
+            chapter.append
+        );
+        let body = client
+            .get(url)
+            .header(header::REFERER, "https://weebcentral.com")
+            .send()
+            .await
+            .unwrap();
+        if body.headers().get(CONTENT_TYPE).unwrap().to_str().unwrap() != "image/png" {
+            tokio::time::sleep(Duration::from_millis(T)).await;
+            continue;
+        }
+        bytes = body.bytes().await.unwrap().into();
+        if bytes.is_empty() {
+            tokio::time::sleep(Duration::from_millis(T)).await;
+            continue;
+        }
+        break;
+    }
+    (page, bytes)
+}
 async fn download(manga: Manga, p3: &str, client: Client) -> eyre::Result<()> {
     let Manga { name, chapters } = manga;
     let mut sort = Vec::new();
@@ -335,44 +386,9 @@ async fn download(manga: Manga, p3: &str, client: Client) -> eyre::Result<()> {
             .map(async |page| {
                 let client = client.clone();
                 let chapter = chapter.clone();
-                let bytes = task::spawn(async move {
-                    let mut bytes: Vec<u8>;
-                    loop {
-                        let url = format!(
-                            "{}/{:04}{}-{:03}{}",
-                            chapter.url,
-                            version.major,
-                            version
-                                .minor
-                                .map(|i| ".".to_string() + &i.to_string())
-                                .unwrap_or(String::new()),
-                            page,
-                            chapter.append
-                        );
-                        let body = client
-                            .get(url)
-                            .header(header::REFERER, "https://weebcentral.com")
-                            .send()
-                            .await
-                            .unwrap();
-                        if body.headers().get(CONTENT_TYPE).unwrap().to_str().unwrap()
-                            != "image/png"
-                        {
-                            tokio::time::sleep(Duration::from_millis(T)).await;
-                            continue;
-                        }
-                        bytes = body.bytes().await.unwrap().into();
-                        if bytes.is_empty() {
-                            tokio::time::sleep(Duration::from_millis(T)).await;
-                            continue;
-                        }
-                        break;
-                    }
-                    bytes
-                })
-                .await
-                .unwrap();
-                (page, bytes)
+                tokio::spawn(async move { get_img(chapter, version, page, client).await })
+                    .await
+                    .unwrap()
             })
             .collect();
         let images = join_all(tasks)
