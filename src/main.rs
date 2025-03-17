@@ -177,11 +177,13 @@ async fn main() -> eyre::Result<()> {
             ) else {
                 if !new_chapters.is_empty() {
                     let new = std::mem::take(&mut new_chapters);
-                    let name = name.clone();
                     let client = client.clone();
-                    tasks.push(tokio::spawn(async move {
-                        download(name.clone(), new, p3.to_string(), client).await
-                    }));
+                    tasks.push(tokio::spawn(download(
+                        name.to_string(),
+                        new,
+                        p3.to_string(),
+                        client,
+                    )));
                 }
                 tokio::time::sleep(Duration::from_millis(T)).await;
                 chapters.insert(0, base);
@@ -222,9 +224,12 @@ async fn main() -> eyre::Result<()> {
             println!("\x1b[G\x1b[K{}: {}", name, total_new);
             if !new_chapters.is_empty() {
                 let client = client.clone();
-                tasks.push(tokio::spawn(async move {
-                    download(name.clone(), new_chapters, p3.to_string(), client).await
-                }));
+                tasks.push(tokio::spawn(download(
+                    name.to_string(),
+                    new_chapters,
+                    p3.to_string(),
+                    client,
+                )));
             }
         }
         if !list.is_empty() {
@@ -393,8 +398,8 @@ async fn download(
             upper_tasks.push(tokio::spawn(convert_to_strip(
                 paths,
                 version,
-                p3.clone(),
-                name.clone(),
+                p3.to_string(),
+                name.to_string(),
             )));
         }
     }
