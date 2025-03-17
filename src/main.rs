@@ -1,6 +1,6 @@
 use eyre::ContextCompat;
 use futures::future::join_all;
-use image::{GenericImage, ImageFormat, ImageReader, RgbImage};
+use image::{GenericImage, ImageFormat, RgbImage};
 use reqwest::header::CONTENT_TYPE;
 use reqwest::{Client, header};
 use std::cmp::{Ordering, PartialOrd};
@@ -17,6 +17,15 @@ async fn main() -> eyre::Result<()> {
     let p1 = "/home/.li";
     let p2 = "/home/.p/";
     let p3 = "/home/.m/";
+    if !fs::exists(p1)? {
+        fs::write(p1, Vec::new())?;
+    }
+    if !fs::exists(p2)? {
+        fs::create_dir_all(p2)?;
+    }
+    if !fs::exists(p2)? {
+        fs::create_dir_all(p3)?;
+    }
     let mut list = fs::read_to_string(p1)?
         .lines()
         .filter_map(|l| {
@@ -36,17 +45,20 @@ async fn main() -> eyre::Result<()> {
         let p = p?.path();
         let n = p.to_str().unwrap().to_string();
         let n = n.chars().skip(p2.len()).collect::<String>();
-        let r = fs::read_to_string(&p)?.trim().to_string();
+        let mut r = fs::read_to_string(&p)?.trim().to_string();
         let is_list = r.starts_with('#');
-        let r = r.chars().skip(1).take(5).collect::<String>();
+        if is_list {
+            r.remove(0);
+        }
+        let r = r.chars().collect::<String>();
         let major = r.chars().take(4).collect::<String>().parse::<usize>()?;
-        let minor = if !is_list {
-            //TODO make more consistent
-            let minor = r.chars().skip(4).collect::<String>().parse::<usize>()?;
-            if minor == 0 { None } else { Some(minor) }
-        } else {
-            None
-        };
+        let minor = r
+            .chars()
+            .skip(4)
+            .take(1)
+            .collect::<String>()
+            .parse::<usize>()?;
+        let minor = if minor == 0 { None } else { Some(minor) };
         versions.insert(n, (Version { major, minor }, is_list));
     }
     for n in fs::read_dir(p3)? {
@@ -65,40 +77,19 @@ async fn main() -> eyre::Result<()> {
             .rev()
         {
             let s = p.to_str().unwrap();
-            if !s.contains('-') {
-                let major = s
-                    .chars()
-                    .skip(s.find(&name).unwrap() + name.len() + 2)
-                    .collect::<String>()
-                    .parse::<usize>()?;
-                let ver = Version { major, minor: None };
-                match last {
-                    Some(v) if ver > v => {
-                        last = Some(ver);
-                    }
-                    None => {
-                        last = Some(ver);
-                    }
-                    _ => {}
+            let ver = s.chars().skip(s.find(&name).unwrap() + name.len() + 2);
+            let major = ver.clone().take(4).collect::<String>().parse::<usize>()?;
+            let minor = ver.skip(4).take(1).collect::<String>().parse::<usize>()?;
+            let minor = if minor == 0 { None } else { Some(minor) };
+            let ver = Version { major, minor };
+            match last {
+                Some(v) if ver > v => {
+                    last = Some(ver);
                 }
-            } else if s.contains("-001") {
-                let ver = s
-                    .chars()
-                    .skip(s.find(&name).unwrap() + name.len() + 2)
-                    .take(5);
-                let major = ver.clone().take(4).collect::<String>().parse::<usize>()?;
-                let minor = ver.skip(4).collect::<String>().parse::<usize>()?;
-                let minor = if minor == 0 { None } else { Some(minor) };
-                let ver = Version { major, minor };
-                match last {
-                    Some(v) if ver > v => {
-                        last = Some(ver);
-                    }
-                    None => {
-                        last = Some(ver);
-                    }
-                    _ => {}
+                None => {
+                    last = Some(ver);
                 }
+                _ => {}
             }
         }
         if let Some(ver) = last {
@@ -119,7 +110,7 @@ async fn main() -> eyre::Result<()> {
         let name = list.remove(0);
         let url = format!(
             "https://weebcentral.com/search/data?display_mode=Minimal+Display&limit=8&text={}",
-            name.replace('-', "+")
+            name.replace("O-N-E", "ONE").replace('-', "+")
         );
         let body = client
             .get(url)
@@ -129,6 +120,7 @@ async fn main() -> eyre::Result<()> {
             .text()
             .await?;
         if body.contains("No results found") {
+            println!("no results found for {}", name);
             tokio::time::sleep(Duration::from_millis(T)).await;
             continue;
         }
@@ -136,6 +128,7 @@ async fn main() -> eyre::Result<()> {
             .lines()
             .find(|l| l.contains(&format!("/{}\" class", name)))
         else {
+            println!("no results found for {}", name);
             tokio::time::sleep(Duration::from_millis(T)).await;
             continue;
         };
@@ -159,15 +152,13 @@ async fn main() -> eyre::Result<()> {
             })
             .collect();
         if chapters.is_empty() {
+            println!("no results found for {}", name);
             tokio::time::sleep(Duration::from_millis(T)).await;
             continue;
         }
-        let mut manga = Manga {
-            name: name.clone(),
-            chapters: Default::default(),
-        };
+        let mut new_chapters = Vec::new();
+        let mut total_new = 0;
         let total = chapters.len();
-        let mut hit = false;
         while !chapters.is_empty() {
             let base = chapters.remove(0);
             let url = get_url(&base)?;
@@ -184,6 +175,14 @@ async fn main() -> eyre::Result<()> {
                     l.contains(&name) && l.contains("href") && l.contains("as=\"image\"")
                 }),
             ) else {
+                if !new_chapters.is_empty() {
+                    let new = std::mem::take(&mut new_chapters);
+                    let name = name.clone();
+                    let client = client.clone();
+                    tasks.push(tokio::spawn(async move {
+                        download(name.clone(), new, p3.to_string(), client).await
+                    }));
+                }
                 tokio::time::sleep(Duration::from_millis(T)).await;
                 chapters.insert(0, base);
                 continue;
@@ -195,7 +194,7 @@ async fn main() -> eyre::Result<()> {
                 major: chap,
                 minor: part,
             };
-            manga.chapters.insert(
+            new_chapters.push((
                 ver,
                 Chapter {
                     page_count: pages,
@@ -203,15 +202,13 @@ async fn main() -> eyre::Result<()> {
                     append: append.clone(),
                     is_list: versions.get(&name).map(|(_, l)| *l).unwrap_or(false),
                 },
-            );
+            ));
             if let Some(v) = versions.get(&name) {
                 if v.0 >= ver {
-                    if !chapters.is_empty() {
-                        hit = true;
-                    }
                     break;
                 }
             }
+            total_new += 1;
             print!(
                 "\x1b[G\x1b[K{}/{}, {}/{}",
                 total_manga - list.len(),
@@ -221,20 +218,14 @@ async fn main() -> eyre::Result<()> {
             );
             stdout.flush()?;
         }
-        if hit {
-            if manga.chapters.len() > 1 {
-                println!("\x1b[G\x1b[K{}: {}", manga.name, manga.chapters.len() - 1);
+        if total_new > 0 {
+            println!("\x1b[G\x1b[K{}: {}", name, total_new);
+            if !new_chapters.is_empty() {
                 let client = client.clone();
-                tasks.push(tokio::spawn(
-                    async move { download(manga, p3, client).await },
-                ));
+                tasks.push(tokio::spawn(async move {
+                    download(name.clone(), new_chapters, p3.to_string(), client).await
+                }));
             }
-        } else if !manga.chapters.is_empty() {
-            println!("\x1b[G\x1b[K{}: {}", manga.name, manga.chapters.len());
-            let client = client.clone();
-            tasks.push(tokio::spawn(
-                async move { download(manga, p3, client).await },
-            ));
         }
         if !list.is_empty() {
             print!(
@@ -302,10 +293,6 @@ fn get_num(url: &str) -> eyre::Result<usize> {
         .collect::<String>()
         .parse::<usize>()?)
 }
-struct Manga {
-    name: String,
-    chapters: HashMap<Version, Chapter>,
-}
 #[derive(Eq, Hash, PartialEq, Copy, Clone)]
 struct Version {
     major: usize,
@@ -370,17 +357,14 @@ async fn get_img(
     }
     (page, bytes)
 }
-async fn download(manga: Manga, p3: &str, client: Client) -> eyre::Result<()> {
-    let Manga { name, chapters } = manga;
-    let mut sort = Vec::new();
+async fn download(
+    name: String,
+    chapters: Vec<(Version, Chapter)>,
+    p3: String,
+    client: Client,
+) -> eyre::Result<()> {
+    let mut upper_tasks = Vec::new();
     for (version, chapter) in chapters {
-        sort.push((version, chapter));
-    }
-    sort.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-    if !sort.is_empty() {
-        fs::create_dir_all(Path::new(p3).join(&name))?;
-    }
-    for (version, chapter) in sort {
         let mut paths = Vec::new();
         let tasks: Vec<_> = (1..=chapter.page_count)
             .map(async |page| {
@@ -391,53 +375,64 @@ async fn download(manga: Manga, p3: &str, client: Client) -> eyre::Result<()> {
                     .unwrap()
             })
             .collect();
-        let images = join_all(tasks)
-            .await
-            .into_iter()
-            .collect::<Vec<(usize, Vec<u8>)>>();
-        for (page, bytes) in images {
-            let path = Path::new(p3).join(&name).join(format!(
-                "1{:04}{}-{:03}",
-                version.major,
-                version.minor.unwrap_or(0),
-                page
-            ));
-            let mut file = File::create(&path)?;
-            file.write_all(&bytes)?;
+        for (page, bytes) in join_all(tasks).await {
             if chapter.is_list {
-                paths.push(path);
+                paths.push(bytes)
+            } else {
+                let path = Path::new(&p3).join(&name).join(format!(
+                    "{:04}{}-{:03}",
+                    version.major,
+                    version.minor.unwrap_or(0),
+                    page
+                ));
+                let mut file = File::create(&path)?;
+                file.write_all(&bytes)?;
             }
         }
         if chapter.is_list {
-            let mut height = 0;
-            let width = {
-                let w = ImageReader::open(&paths[paths.len() / 2])?
-                    .with_guessed_format()?
-                    .decode()?;
-                w.width()
-            };
-            let mut images = Vec::new();
-            for path in &paths {
-                let w = ImageReader::open(path)?.with_guessed_format()?.decode()?;
-                if w.width() == width {
-                    height += w.height();
-                    images.push(w.as_rgb8().wrap_err("image err")?.clone());
-                }
-            }
-            for path in paths {
-                fs::remove_file(path)?;
-            }
-            let mut image = RgbImage::new(width, height);
-            let mut running_height = 0;
-            for rgb in images {
-                image.copy_from(&rgb, 0, running_height)?;
-                running_height += rgb.height();
-            }
-            let path = Path::new(p3)
-                .join(&name)
-                .join(format!("#{:04}", version.major));
-            image.save_with_format(path, ImageFormat::Png)?;
+            upper_tasks.push(tokio::spawn(convert_to_strip(
+                paths,
+                version,
+                p3.clone(),
+                name.clone(),
+            )));
         }
     }
+    for t in join_all(upper_tasks).await {
+        t??;
+    }
+    Ok(())
+}
+async fn convert_to_strip(
+    paths: Vec<Vec<u8>>,
+    version: Version,
+    p3: String,
+    name: String,
+) -> eyre::Result<()> {
+    let mut height = 0;
+    let width = {
+        let w = image::load_from_memory(&paths[paths.len() / 2])?;
+        w.width()
+    };
+    let mut images = Vec::new();
+    for path in &paths {
+        let w = image::load_from_memory(path)?;
+        if w.width() == width {
+            height += w.height();
+            images.push(w.as_rgb8().wrap_err("image err")?.clone());
+        }
+    }
+    let mut image = RgbImage::new(width, height);
+    let mut running_height = 0;
+    for rgb in images {
+        image.copy_from(&rgb, 0, running_height)?;
+        running_height += rgb.height();
+    }
+    let path = Path::new(&p3).join(name).join(format!(
+        "{:04}{}",
+        version.major,
+        version.minor.unwrap_or(0)
+    ));
+    image.save_with_format(path, ImageFormat::Png)?;
     Ok(())
 }
