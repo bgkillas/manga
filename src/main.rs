@@ -59,10 +59,7 @@ async fn main() -> eyre::Result<()> {
         let n = p.to_str().unwrap().to_string();
         let n = n.chars().skip(p2.len()).collect::<String>();
         let mut r = fs::read_to_string(&p)?.trim().to_string();
-        let is_list = r.starts_with('#');
-        if is_list {
-            r.remove(0);
-        }
+        let is_list = !r.contains('-');
         let major = r.chars().take(4).collect::<String>().parse::<usize>()?;
         let minor = r
             .chars()
