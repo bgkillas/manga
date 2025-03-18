@@ -3,6 +3,11 @@ name = "manga"
 version = "0.1.0"
 edition = "2024"
 
+[profile.release]
+lto = true
+strip = true
+panic = "abort"
+
 [dependencies]
 reqwest = "0.12.12"
 tokio = { version = "1.43.0", features = ["rt", "rt-multi-thread", "macros"] }
