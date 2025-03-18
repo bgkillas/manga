@@ -12,9 +12,10 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::task::JoinHandle;
 const T: u64 = 10000;
+const TS: u64 = 1000;
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> eyre::Result<()> {
-    let p1 = "/home/.li";
+    let p1 = "/home/.li"; //TODO make these settings
     let p2 = "/home/.p/";
     let p3 = "/home/.m/";
     if !fs::exists(p1)? {
@@ -29,13 +30,25 @@ async fn main() -> eyre::Result<()> {
     let mut list = fs::read_to_string(p1)?
         .lines()
         .filter_map(|l| {
-            if !l.contains('#') && !l.contains("tower-of-god") {
-                Some(l.chars().filter(|c| !c.is_ascii_whitespace()).collect())
+            if !l.contains('#') {
+                let l: String = l.chars().filter(|c| !c.is_ascii_whitespace()).collect();
+                if l.contains('@') {
+                    let p = l.find('@').unwrap();
+                    let a = l.chars().take(p).collect::<String>();
+                    let b = l.chars().skip(p + 1).collect::<String>();
+                    if b.is_empty() {
+                        None
+                    } else {
+                        Some((a, Some(b)))
+                    }
+                } else {
+                    Some((l, None))
+                }
             } else {
                 None
             }
         })
-        .collect::<Vec<String>>();
+        .collect::<Vec<(String, Option<String>)>>();
     let total_manga = list.len();
     let mut stdout = stdout().lock();
     print!("\x1b[G\x1b[K1/{}", total_manga);
@@ -50,7 +63,6 @@ async fn main() -> eyre::Result<()> {
         if is_list {
             r.remove(0);
         }
-        let r = r.chars().collect::<String>();
         let major = r.chars().take(4).collect::<String>().parse::<usize>()?;
         let minor = r
             .chars()
@@ -77,7 +89,7 @@ async fn main() -> eyre::Result<()> {
             .rev()
         {
             let s = p.to_str().unwrap();
-            let ver = s.chars().skip(s.find(&name).unwrap() + name.len() + 2);
+            let ver = s.chars().skip(s.find(&name).unwrap() + name.len() + 1);
             let major = ver.clone().take(4).collect::<String>().parse::<usize>()?;
             let minor = ver.skip(4).take(1).collect::<String>().parse::<usize>()?;
             let minor = if minor == 0 { None } else { Some(minor) };
@@ -110,8 +122,9 @@ async fn main() -> eyre::Result<()> {
         let name = list.remove(0);
         let url = format!(
             "https://weebcentral.com/search/data?display_mode=Minimal+Display&limit=8&text={}",
-            name.replace("O-N-E", "ONE").replace('-', "+")
+            name.1.as_ref().unwrap_or(&name.0).replace(['-', ' '], "+")
         );
+        let name = name.0;
         let body = client
             .get(url)
             .header(header::REFERER, "https://weebcentral.com")
@@ -120,16 +133,14 @@ async fn main() -> eyre::Result<()> {
             .text()
             .await?;
         if body.contains("No results found") {
-            println!("no results found for {}", name);
-            tokio::time::sleep(Duration::from_millis(T)).await;
+            println!("\nno results found for {}", name);
             continue;
         }
         let Some(url) = body
             .lines()
             .find(|l| l.contains(&format!("/{}\" class", name)))
         else {
-            println!("no results found for {}", name);
-            tokio::time::sleep(Duration::from_millis(T)).await;
+            println!("\nno body found for {}", name);
             continue;
         };
         let url = get_url(url)?;
@@ -152,8 +163,7 @@ async fn main() -> eyre::Result<()> {
             })
             .collect();
         if chapters.is_empty() {
-            println!("no results found for {}", name);
-            tokio::time::sleep(Duration::from_millis(T)).await;
+            println!("\nno chapters found for {}", name);
             continue;
         }
         let mut new_chapters = Vec::new();
@@ -350,12 +360,12 @@ async fn get_img(
             .await
             .unwrap();
         if body.headers().get(CONTENT_TYPE).unwrap().to_str().unwrap() != "image/png" {
-            tokio::time::sleep(Duration::from_millis(T)).await;
+            tokio::time::sleep(Duration::from_millis(TS)).await;
             continue;
         }
         bytes = body.bytes().await.unwrap().into();
         if bytes.is_empty() {
-            tokio::time::sleep(Duration::from_millis(T)).await;
+            tokio::time::sleep(Duration::from_millis(TS)).await;
             continue;
         }
         break;
@@ -369,6 +379,8 @@ async fn download(
     client: Client,
 ) -> eyre::Result<()> {
     let mut upper_tasks = Vec::new();
+    let p = Path::new(&p3).join(&name);
+    fs::create_dir_all(&p)?;
     for (version, chapter) in chapters {
         let mut paths = Vec::new();
         let tasks: Vec<_> = (1..=chapter.page_count)
@@ -384,7 +396,7 @@ async fn download(
             if chapter.is_list {
                 paths.push(bytes)
             } else {
-                let path = Path::new(&p3).join(&name).join(format!(
+                let path = p.join(format!(
                     "{:04}{}-{:03}",
                     version.major,
                     version.minor.unwrap_or(0),
