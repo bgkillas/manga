@@ -24,7 +24,7 @@ async fn main() -> eyre::Result<()> {
     if !fs::exists(p2)? {
         fs::create_dir_all(p2)?;
     }
-    if !fs::exists(p2)? {
+    if !fs::exists(p3)? {
         fs::create_dir_all(p3)?;
     }
     let mut list = fs::read_to_string(p1)?
@@ -206,15 +206,18 @@ async fn main() -> eyre::Result<()> {
                 major: chap,
                 minor: part,
             };
-            new_chapters.push((
-                ver,
-                Chapter {
-                    page_count: pages,
-                    url: site.clone(),
-                    append: append.clone(),
-                    is_list: versions.get(&name).map(|(_, l)| *l).unwrap_or(false),
-                },
-            ));
+            new_chapters.insert(
+                0,
+                (
+                    ver,
+                    Chapter {
+                        page_count: pages,
+                        url: site.clone(),
+                        append: append.clone(),
+                        is_list: versions.get(&name).map(|(_, l)| *l).unwrap_or(false),
+                    },
+                ),
+            );
             if let Some(v) = versions.get(&name) {
                 if v.0 >= ver {
                     break;
