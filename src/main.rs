@@ -5,6 +5,7 @@ use reqwest::header::CONTENT_TYPE;
 use reqwest::{Client, header};
 use std::cmp::{Ordering, PartialOrd};
 use std::collections::HashMap;
+use std::env::args;
 use std::fs;
 use std::fs::File;
 use std::io::{Write, stdout};
@@ -15,9 +16,41 @@ const T: u64 = 10000;
 const TS: u64 = 1000;
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> eyre::Result<()> {
-    let p1 = "/home/.li"; //TODO make these settings
-    let p2 = "/home/.p/";
-    let p3 = "/home/.m/";
+    let mut args = args().collect::<Vec<String>>();
+    args.remove(0);
+    let p1 = args
+        .iter()
+        .find_map(|l| {
+            if l.contains("--list=") {
+                Some(l.chars().skip(7).collect::<String>())
+            } else {
+                None
+            }
+        })
+        .unwrap_or("/home/.li".to_string());
+    let p1 = &p1;
+    let p2 = args
+        .iter()
+        .find_map(|l| {
+            if l.contains("--pages=") {
+                Some(l.chars().skip(8).collect::<String>())
+            } else {
+                None
+            }
+        })
+        .unwrap_or("/home/.p/".to_string());
+    let p2 = &p2;
+    let p3 = args
+        .iter()
+        .find_map(|l| {
+            if l.contains("--save=") {
+                Some(l.chars().skip(7).collect::<String>())
+            } else {
+                None
+            }
+        })
+        .unwrap_or("/home/.m/".to_string());
+    let p3 = &p3;
     if !fs::exists(p1)? {
         fs::write(p1, Vec::new())?;
     }
@@ -49,6 +82,17 @@ async fn main() -> eyre::Result<()> {
             }
         })
         .collect::<Vec<(String, Option<String>)>>();
+    for l in args.iter().filter(|l| !l.contains('=')) {
+        let l: String = l.chars().filter(|c| !c.is_ascii_whitespace()).collect();
+        list.push(if l.contains('@') {
+            let p = l.find('@').unwrap();
+            let a = l.chars().take(p).collect::<String>();
+            let b = l.chars().skip(p + 1).collect::<String>();
+            (a, Some(b))
+        } else {
+            (l, None)
+        });
+    }
     let total_manga = list.len();
     let mut stdout = stdout().lock();
     print!("\x1b[G\x1b[K1/{}", total_manga);
